@@ -7,7 +7,7 @@ import (
 	"net/url"
 	"unsafe"
 
-	"github.com/valyala/fasthttp"
+	"github.com/domsolutions/fasthttp"
 )
 
 // ConvertRequest converts a fasthttp.Request to an http.Request.

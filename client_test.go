@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/valyala/fasthttp/fasthttputil"
+	"github.com/domsolutions/fasthttp/fasthttputil"
 )
 
 func TestCloseIdleConnections(t *testing.T) {

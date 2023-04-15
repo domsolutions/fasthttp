@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/valyala/fasthttp"
-	"github.com/valyala/fasthttp/reuseport"
+	"github.com/domsolutions/fasthttp"
+	"github.com/domsolutions/fasthttp/reuseport"
 )
 
 func ExampleListen() {

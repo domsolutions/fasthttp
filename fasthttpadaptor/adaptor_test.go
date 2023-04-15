@@ -8,7 +8,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/valyala/fasthttp"
+	"github.com/domsolutions/fasthttp"
 )
 
 func TestNewFastHTTPHandler(t *testing.T) {
