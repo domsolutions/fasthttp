@@ -1,5 +1,5 @@
 host_client: clean
-	go get -u github.com/valyala/fasthttp
+	go get -u github.com/domsolutions/fasthttp
 	go build
 
 clean:

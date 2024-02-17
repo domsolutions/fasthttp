@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http/httptrace"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -265,7 +266,7 @@ type Client struct {
 	//
 	// Disabled header names' normalization may be useful only for proxying
 	// responses to other clients expecting case-sensitive
-	// header names. See https://github.com/valyala/fasthttp/issues/57
+	// header names. See https://github.com/domsolutions/fasthttp/issues/57
 	// for details.
 	//
 	// By default request and response header names are normalized, i.e.
@@ -785,7 +786,7 @@ type HostClient struct {
 	//
 	// Disabled header names' normalization may be useful only for proxying
 	// responses to other clients expecting case-sensitive
-	// header names. See https://github.com/valyala/fasthttp/issues/57
+	// header names. See https://github.com/domsolutions/fasthttp/issues/57
 	// for details.
 	//
 	// By default request and response header names are normalized, i.e.
@@ -861,6 +862,8 @@ type HostClient struct {
 	pendingClientRequests int32
 
 	connsCleanerRun bool
+
+	ctx *httptrace.ClientTrace
 }
 
 type clientConn struct {
@@ -1465,6 +1468,7 @@ func (c *HostClient) SetMaxConns(newMaxConns int) {
 func (c *HostClient) acquireConn(reqTimeout time.Duration, connectionClose bool) (cc *clientConn, err error) {
 	createConn := false
 	startCleaner := false
+	trace := c.ctx
 
 	var n int
 	c.connsLock.Lock()
@@ -1502,6 +1506,14 @@ func (c *HostClient) acquireConn(reqTimeout time.Duration, connectionClose bool)
 	c.connsLock.Unlock()
 
 	if cc != nil {
+		if trace != nil && trace.GotConn != nil {
+			trace.GotConn(httptrace.GotConnInfo{
+				Conn:     cc.c,
+				Reused:   true,
+				WasIdle:  true,
+				IdleTime: time.Now().Sub(cc.lastUseTime),
+			})
+		}
 		return cc, nil
 	}
 	if !createConn {
@@ -1540,6 +1552,14 @@ func (c *HostClient) acquireConn(reqTimeout time.Duration, connectionClose bool)
 
 		select {
 		case <-w.ready:
+			if trace != nil && trace.GotConn != nil {
+				trace.GotConn(httptrace.GotConnInfo{
+					Conn:     w.conn.c,
+					Reused:   true,
+					WasIdle:  true,
+					IdleTime: time.Now().Sub(w.conn.lastUseTime),
+				})
+			}
 			return w.conn, w.err
 		case <-tc.C:
 			if timeoutOverridden {
@@ -1559,6 +1579,14 @@ func (c *HostClient) acquireConn(reqTimeout time.Duration, connectionClose bool)
 		return nil, err
 	}
 	cc = acquireClientConn(conn)
+
+	if trace != nil && trace.GotConn != nil {
+		trace.GotConn(httptrace.GotConnInfo{
+			Conn:    cc.c,
+			Reused:  false,
+			WasIdle: false,
+		})
+	}
 
 	return cc, nil
 }
@@ -1722,6 +1750,12 @@ func releaseClientConn(cc *clientConn) {
 var clientConnPool sync.Pool
 
 func (c *HostClient) releaseConn(cc *clientConn) {
+	defer func() {
+		if c.ctx != nil && c.ctx.PutIdleConn != nil {
+			c.ctx.PutIdleConn(nil)
+		}
+	}()
+
 	cc.lastUseTime = time.Now()
 	if c.MaxConnWaitTimeout <= 0 {
 		c.connsLock.Lock()
@@ -1883,7 +1917,7 @@ func (c *HostClient) dialHostHard(dialTimeout time.Duration) (conn net.Conn, err
 	for n > 0 {
 		addr := c.nextAddr()
 		tlsConfig := c.cachedTLSConfig(addr)
-		conn, err = dialAddr(addr, c.Dial, c.DialTimeout, c.DialDualStack, c.IsTLS, tlsConfig, dialTimeout, c.WriteTimeout)
+		conn, err = dialAddr(addr, c.Dial, c.DialTimeout, c.DialDualStack, c.IsTLS, tlsConfig, dialTimeout, c.WriteTimeout, c.ctx)
 		if err == nil {
 			return conn, nil
 		}
@@ -1917,7 +1951,7 @@ func (c *HostClient) cachedTLSConfig(addr string) *tls.Config {
 // ErrTLSHandshakeTimeout indicates there is a timeout from tls handshake.
 var ErrTLSHandshakeTimeout = errors.New("tls handshake timed out")
 
-func tlsClientHandshake(rawConn net.Conn, tlsConfig *tls.Config, deadline time.Time) (_ net.Conn, retErr error) {
+func tlsClientHandshake(rawConn net.Conn, tlsConfig *tls.Config, deadline time.Time, trace *httptrace.ClientTrace) (_ net.Conn, retErr error) {
 	defer func() {
 		if retErr != nil {
 			rawConn.Close()
@@ -1928,7 +1962,14 @@ func tlsClientHandshake(rawConn net.Conn, tlsConfig *tls.Config, deadline time.T
 	if err != nil {
 		return nil, err
 	}
+
+	if trace != nil && trace.TLSHandshakeStart != nil {
+		trace.TLSHandshakeStart()
+	}
 	err = conn.Handshake()
+	if trace != nil && trace.TLSHandshakeDone != nil {
+		trace.TLSHandshakeDone(conn.ConnectionState(), err)
+	}
 	if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 		return nil, ErrTLSHandshakeTimeout
 	}
@@ -1944,7 +1985,7 @@ func tlsClientHandshake(rawConn net.Conn, tlsConfig *tls.Config, deadline time.T
 
 func dialAddr(
 	addr string, dial DialFunc, dialWithTimeout DialFuncWithTimeout, dialDualStack, isTLS bool,
-	tlsConfig *tls.Config, dialTimeout, writeTimeout time.Duration,
+	tlsConfig *tls.Config, dialTimeout, writeTimeout time.Duration, trace *httptrace.ClientTrace,
 ) (net.Conn, error) {
 	deadline := time.Now().Add(writeTimeout)
 	conn, err := callDialFunc(addr, dial, dialWithTimeout, dialDualStack, isTLS, dialTimeout)
@@ -1963,7 +2004,7 @@ func dialAddr(
 		if writeTimeout == 0 {
 			return tls.Client(conn, tlsConfig), nil
 		}
-		return tlsClientHandshake(conn, tlsConfig, deadline)
+		return tlsClientHandshake(conn, tlsConfig, deadline, trace)
 	}
 	return conn, nil
 }
@@ -2210,7 +2251,7 @@ type PipelineClient struct {
 	//
 	// Disabled header names' normalization may be useful only for proxying
 	// responses to other clients expecting case-sensitive
-	// header names. See https://github.com/valyala/fasthttp/issues/57
+	// header names. See https://github.com/domsolutions/fasthttp/issues/57
 	// for details.
 	//
 	// By default request and response header names are normalized, i.e.
@@ -2634,7 +2675,7 @@ func (c *pipelineConnClient) init() {
 
 func (c *pipelineConnClient) worker() error {
 	tlsConfig := c.cachedTLSConfig()
-	conn, err := dialAddr(c.Addr, c.Dial, nil, c.DialDualStack, c.IsTLS, tlsConfig, 0, c.WriteTimeout)
+	conn, err := dialAddr(c.Addr, c.Dial, nil, c.DialDualStack, c.IsTLS, tlsConfig, 0, c.WriteTimeout, nil)
 	if err != nil {
 		return err
 	}
@@ -2892,6 +2933,9 @@ func (t *transport) RoundTrip(hc *HostClient, req *Request, resp *Response) (ret
 		deadline = time.Now().Add(req.timeout)
 	}
 
+	if hc.ctx != nil && hc.ctx.GetConn != nil {
+		hc.ctx.GetConn(hc.Addr)
+	}
 	cc, err := hc.acquireConn(req.timeout, req.ConnectionClose())
 	if err != nil {
 		return false, err
@@ -2970,6 +3014,9 @@ func (t *transport) RoundTrip(hc *HostClient, req *Request, resp *Response) (ret
 		// Don't retry in case of ErrBodyTooLarge since we will just get the same again.
 		needRetry := err != ErrBodyTooLarge
 		return needRetry, err
+	}
+	if hc.ctx != nil && hc.ctx.GotFirstResponseByte != nil {
+		hc.ctx.GotFirstResponseByte()
 	}
 
 	closeConn := resetConnection || req.ConnectionClose() || resp.ConnectionClose() || isConnRST

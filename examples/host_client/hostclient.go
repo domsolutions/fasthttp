@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/valyala/fasthttp"
+	"github.com/domsolutions/fasthttp"
 )
 
 func main() {
