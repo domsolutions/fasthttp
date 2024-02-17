@@ -10,6 +10,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net"
+	"net/http/httptrace"
 	"os"
 	"sync"
 	"time"
@@ -77,6 +78,8 @@ type Request struct {
 	// By default redirect path values are normalized, i.e.
 	// extra slashes are removed, special characters are encoded.
 	DisableRedirectPathNormalizing bool
+
+	ctx *httptrace.ClientTrace
 }
 
 // Response represents HTTP response.
@@ -1548,13 +1551,22 @@ func (req *Request) onlyMultipartForm() bool {
 // Write doesn't flush request to w for performance reasons.
 //
 // See also WriteTo.
-func (req *Request) Write(w *bufio.Writer) error {
+func (req *Request) Write(w *bufio.Writer) (err error) {
+	if req.ctx != nil && req.ctx.WroteRequest != nil {
+		defer func() {
+			req.ctx.WroteRequest(httptrace.WroteRequestInfo{
+				Err: err,
+			})
+		}()
+	}
+
 	if len(req.Header.Host()) == 0 || req.parsedURI {
 		uri := req.URI()
 		host := uri.Host()
 		if len(req.Header.Host()) == 0 {
 			if len(host) == 0 {
-				return errRequestHostRequired
+				err = errRequestHostRequired
+				return
 			} else {
 				req.Header.SetHostBytes(host)
 			}
@@ -1584,15 +1596,16 @@ func (req *Request) Write(w *bufio.Writer) error {
 	}
 
 	if req.bodyStream != nil {
-		return req.writeBodyStream(w)
+		err = req.writeBodyStream(w)
+		return
 	}
 
 	body := req.bodyBytes()
-	var err error
 	if req.onlyMultipartForm() {
 		body, err = marshalMultipartForm(req.multipartForm, req.multipartFormBoundary)
 		if err != nil {
-			return fmt.Errorf("error when marshaling multipart form: %w", err)
+			err = fmt.Errorf("error when marshaling multipart form: %w", err)
+			return
 		}
 		req.Header.SetMultipartFormBoundary(req.multipartFormBoundary)
 	}
@@ -1614,9 +1627,9 @@ func (req *Request) Write(w *bufio.Writer) error {
 		if req.secureErrorLogMessage {
 			return fmt.Errorf("non-zero body for non-POST request")
 		}
-		return fmt.Errorf("non-zero body for non-POST request. body=%q", body)
+		err = fmt.Errorf("non-zero body for non-POST request. body=%q", body)
 	}
-	return err
+	return
 }
 
 // WriteGzip writes response with gzipped body to w.
@@ -1696,7 +1709,7 @@ func (resp *Response) brotliBody(level int) error {
 	if resp.bodyStream != nil {
 		// Reset Content-Length to -1, since it is impossible
 		// to determine body size beforehand of streamed compression.
-		// For https://github.com/valyala/fasthttp/issues/176 .
+		// For https://github.com/domsolutions/fasthttp/issues/176 .
 		resp.Header.SetContentLength(-1)
 
 		// Do not care about memory allocations here, since brotli is slow
@@ -1752,7 +1765,7 @@ func (resp *Response) gzipBody(level int) error {
 	if resp.bodyStream != nil {
 		// Reset Content-Length to -1, since it is impossible
 		// to determine body size beforehand of streamed compression.
-		// For https://github.com/valyala/fasthttp/issues/176 .
+		// For https://github.com/domsolutions/fasthttp/issues/176 .
 		resp.Header.SetContentLength(-1)
 
 		// Do not care about memory allocations here, since gzip is slow
@@ -1808,7 +1821,7 @@ func (resp *Response) deflateBody(level int) error {
 	if resp.bodyStream != nil {
 		// Reset Content-Length to -1, since it is impossible
 		// to determine body size beforehand of streamed compression.
-		// For https://github.com/valyala/fasthttp/issues/176 .
+		// For https://github.com/domsolutions/fasthttp/issues/176 .
 		resp.Header.SetContentLength(-1)
 
 		// Do not care about memory allocations here, since flate is slow

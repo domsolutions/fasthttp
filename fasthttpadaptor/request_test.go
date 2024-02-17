@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/valyala/fasthttp"
+	"github.com/domsolutions/fasthttp"
 )
 
 func BenchmarkConvertRequest(b *testing.B) {

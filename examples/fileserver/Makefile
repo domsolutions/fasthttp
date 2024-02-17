@@ -1,6 +1,6 @@
 fileserver: clean
-	go get -u github.com/valyala/fasthttp
-	go get -u github.com/valyala/fasthttp/expvarhandler
+	go get -u github.com/domsolutions/fasthttp
+	go get -u github.com/domsolutions/fasthttp/expvarhandler
 	go build
 
 clean:
